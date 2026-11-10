@@ -5,6 +5,8 @@ No GUI dependencies. The web page calls `calculate_json(name)`.
 import json
 import re
 
+__version__ = "0.8"
+
 ELEMENTS = {
     'C': 12.00000000000,
     'H':  1.00782503223,
@@ -72,7 +74,7 @@ PHOSPHOCHOLINE_ACID = {'C': 5, 'H': 14, 'N':  1, 'O': 4, 'P': 1}
 LCB_PREFIXES = {
     'D': {'H_OFFSET': 3, 'O_COUNT': 2},
     'T': {'H_OFFSET': 3, 'O_COUNT': 3},
-    'M': {'H_OFFSET': 5, 'O_COUNT': 1},
+    'M': {'H_OFFSET': 3, 'O_COUNT': 1},
 }
 
 LINK_LABELS = {
@@ -269,7 +271,136 @@ def parse_lipid_name(raw_name):
         if c <= 0 or d < 0 or d > c:
             raise ValueError(f"Invalid chain {c}:{d}.")
 
-    return base_head, linkage, formula
+    return base_head, linkage, formula, chains, lyso_prefix
+
+
+# ── Structure (SMILES) generation ─────────────────────────────────────────────
+# Shorthand names do not give double-bond positions, so common positions are
+# assumed (e.g. 20:4 -> Δ5,8,11,14); otherwise methylene-interrupted placement.
+COMMON_DB_POSITIONS = {
+    (14, 1): [9], (16, 1): [9], (18, 1): [9], (18, 2): [9, 12],
+    (18, 3): [9, 12, 15], (20, 1): [11], (20, 2): [11, 14],
+    (20, 3): [8, 11, 14], (20, 4): [5, 8, 11, 14], (20, 5): [5, 8, 11, 14, 17],
+    (22, 1): [13], (22, 4): [7, 10, 13, 16], (22, 5): [7, 10, 13, 16, 19],
+    (22, 6): [4, 7, 10, 13, 16, 19], (24, 1): [15],
+}
+
+PHOSPHOCHOLINE = 'P(=O)([O-])OCC[N+](C)(C)C'
+GP_HEAD_SMILES = {
+    'PC': PHOSPHOCHOLINE,
+    'PE': 'P(=O)(O)OCCN',
+    'PS': 'P(=O)(O)OCC(N)C(=O)O',
+    'PG': 'P(=O)(O)OCC(O)CO',
+    'PI': 'P(=O)(O)OC1C(O)C(O)C(O)C(O)C1O',
+    'PA': 'P(=O)(O)O',
+}
+
+
+def db_positions(carbons, double_bonds, min_start=2, common=True):
+    if double_bonds == 0:
+        return []
+    if common and (carbons, double_bonds) in COMMON_DB_POSITIONS:
+        pos = COMMON_DB_POSITIONS[(carbons, double_bonds)]
+        if pos[0] >= min_start and pos[-1] < carbons:
+            return list(pos)
+    for last in (carbons - 6, carbons - 3, carbons - 1):
+        start = last - 3 * (double_bonds - 1)
+        if start >= min_start:
+            return list(range(start, last + 1, 3))
+    pos = list(range(min_start, min_start + 2 * double_bonds, 2))
+    return pos if pos[-1] < carbons else None
+
+
+def chain_smiles(carbons, dbs, subs=None):
+    """Linear chain C1..Cn; `dbs` are Δ positions; `subs` maps index->branches."""
+    subs = subs or {}
+    out = []
+    for i in range(1, carbons + 1):
+        out.append('C' + ''.join(f'({s})' for s in subs.get(i, [])))
+        if i < carbons and i in dbs:
+            out.append('=')
+    return ''.join(out)
+
+
+def acyl_smiles(c, d):
+    dbs = db_positions(c, d)
+    if dbs is None or c < 1:
+        return None
+    return chain_smiles(c, dbs, {1: ['=O']})
+
+
+def radyl_smiles(c, d, linkage):
+    if linkage == 'ester':
+        return acyl_smiles(c, d)
+    if linkage == 'O':
+        dbs = db_positions(c, d, min_start=2)
+        return None if dbs is None else chain_smiles(c, dbs)
+    if linkage == 'P':
+        if c < 2:
+            return None
+        dbs = db_positions(c, d, min_start=3)
+        return None if dbs is None else chain_smiles(c, [1] + dbs)
+    return None
+
+
+def lcb_smiles(prefix, c, d, acyl):
+    prefix = (prefix or 'D').upper()
+    if c < 3:
+        return None
+    if prefix == 'D' and d >= 1:
+        rest = db_positions(c, d - 1, min_start=6, common=False)
+        dbs = None if rest is None else [4] + rest
+    else:
+        dbs = db_positions(c, d, min_start=4 if prefix == 'D' else 5 if prefix == 'T' else 3,
+                           common=False)
+    if dbs is None:
+        return None
+    subs = {1: ['O' + PHOSPHOCHOLINE], 2: ['N' + acyl]}
+    if prefix in ('D', 'T'):
+        subs[3] = ['O']
+    if prefix == 'T':
+        subs[4] = ['O']
+    return chain_smiles(c, dbs, subs)
+
+
+def lipid_smiles(base_head, linkage, chains, lyso):
+    """Representative SMILES, or None if not drawable (e.g. summed composition)."""
+    if base_head == 'FA':
+        a = acyl_smiles(chains[0][1], chains[0][2])
+        return None if a is None else 'O' + a
+
+    if base_head == 'SM':
+        (p, c1, d1), (_, c2, d2) = chains
+        acyl = acyl_smiles(c2, d2)
+        return None if acyl is None else lcb_smiles(p, c1, d1, acyl)
+
+    if base_head in GP_CLASSES:
+        if lyso:
+            r1 = radyl_smiles(chains[0][1], chains[0][2], linkage)
+            return None if r1 is None else f'C(O{r1})C(O)CO{GP_HEAD_SMILES[base_head]}'
+        if len(chains) != 2:
+            return None
+        r1 = radyl_smiles(chains[0][1], chains[0][2], linkage)
+        r2 = acyl_smiles(chains[1][1], chains[1][2])
+        if r1 is None or r2 is None:
+            return None
+        return f'C(O{r1})C(O{r2})CO{GP_HEAD_SMILES[base_head]}'
+
+    expected = {'MG': 1, 'DG': 2, 'TG': 3, 'CL': 4}.get(base_head)
+    if expected is None or len(chains) != expected:
+        return None
+    acyls = [acyl_smiles(c, d) for _, c, d in chains]
+    if any(a is None for a in acyls):
+        return None
+    if base_head == 'MG':
+        return f'C(O{acyls[0]})C(O)CO'
+    if base_head == 'DG':
+        return f'C(O{acyls[0]})C(O{acyls[1]})CO'
+    if base_head == 'TG':
+        return f'C(O{acyls[0]})C(O{acyls[1]})CO{acyls[2]}'
+    r1, r2, r3, r4 = acyls
+    return (f'OC(COP(=O)(O)OCC(O{r2})CO{r1})'
+            f'COP(=O)(O)OCC(O{r3})CO{r4}')
 
 
 def formula_to_hill(formula):
@@ -280,8 +411,12 @@ def formula_to_hill(formula):
 def calculate(raw_name):
     """Return a JSON-serialisable dict; never raises."""
     try:
-        base_head, linkage, formula = parse_lipid_name(raw_name)
+        base_head, linkage, formula, chains, lyso = parse_lipid_name(raw_name)
         mass = calculate_formula_mass(formula)
+        try:
+            smiles = lipid_smiles(base_head, linkage, chains, lyso)
+        except Exception:
+            smiles = None
         label = HEADGROUPS[base_head]
         if base_head in GP_CLASSES or base_head == 'SM':
             label += f" [{LINK_LABELS.get(linkage, linkage)}]"
@@ -292,6 +427,9 @@ def calculate(raw_name):
             'class': label,
             'formula': formula_str,
             'mass': mass,
+            'smiles': smiles,
+            'summed': smiles is None and len(chains) == 1 and base_head not in ('FA', 'MG')
+                      and not lyso,
             'adducts': [
                 {'adduct': a, 'mode': m, 'z': z, 'tag': t,
                  'mz': (mass + ADDUCTS[a]) / z}

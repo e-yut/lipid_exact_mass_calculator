@@ -9,6 +9,8 @@ A desktop GUI tool for calculating **monoisotopic exact masses** and **adduct m/
 
 Developed by **Eylan Yutuc** for use in lipidomics and LC-MS/MS research workflows.
 
+**🌐 Web app:** <https://e-yut.github.io/lipid_exact_mass_calculator/> runs in the browser with no install. The Python core (`app.py`) runs client-side via [Pyodide](https://pyodide.org/). Structures are drawn with [SmilesDrawer](https://github.com/reymond-group/smilesDrawer).
+
 ---
 
 ## Features
@@ -208,6 +210,14 @@ This returns all PubChem compounds matching the molecular formula, ranked by exa
 ---
 
 ## Changelog
+
+### v0.8 (web app)
+- ☀️/🌙 light/dark mode toggle (remembers your choice)
+- Molecular structure panel: representative structure drawn from a generated SMILES (double-bond positions assumed, no stereochemistry); summed compositions such as PC(38:4) are not drawn
+- Precision drop-down for exact mass and m/z, from 0 to 7 decimal places
+- 📋 copy-to-clipboard button next to each adduct m/z
+- Footer with credits and version
+- Fixed the `m` (1-deoxy) sphingoid base H count, which was 2 H too high in SM(m…) formulas
 
 ### v0.7 — 2026-06-01
 - Updated Na-23, K-39, and Cl-35 adduct constants to full NIST AME2020 precision (8 significant figures)
